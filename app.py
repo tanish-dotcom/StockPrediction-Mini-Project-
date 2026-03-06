@@ -14,7 +14,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
+<<<<<<< HEAD
+=======
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "trademind-dev-secret-key-change-me")
+>>>>>>> main
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax"
@@ -36,9 +39,69 @@ def normalize_env_value(value):
     return cleaned
 
 
+<<<<<<< HEAD
+def env_to_bool(value, default=False):
+    cleaned = normalize_env_value(value).lower()
+    if not cleaned:
+        return default
+    return cleaned in {"1", "true", "yes", "on"}
+
+
+def env_to_int(value, default):
+    cleaned = normalize_env_value(value)
+    if not cleaned:
+        return default
+    try:
+        return int(cleaned)
+    except ValueError:
+        return default
+
+
+FLASK_SECRET_KEY = normalize_env_value(os.getenv("FLASK_SECRET_KEY")) or "trademind-dev-secret-key-change-me"
+FLASK_DEBUG = env_to_bool(os.getenv("FLASK_DEBUG"), default=False)
+FLASK_HOST = normalize_env_value(os.getenv("FLASK_HOST")) or "127.0.0.1"
+FLASK_PORT = env_to_int(os.getenv("FLASK_PORT"), 5000)
+
+app.secret_key = FLASK_SECRET_KEY
+
 GOOGLE_CLIENT_ID = normalize_env_value(GOOGLE_CLIENT_ID)
 GOOGLE_CLIENT_SECRET = normalize_env_value(GOOGLE_CLIENT_SECRET)
 GOOGLE_REDIRECT_URI = normalize_env_value(os.getenv("GOOGLE_REDIRECT_URI"))
+CHATBOT_API_KEY = normalize_env_value(os.getenv("CHATBOT_API_KEY"))
+CHATBOT_API_BASE_URL = normalize_env_value(os.getenv("CHATBOT_API_BASE_URL")) or "https://api.openai.com/v1"
+CHATBOT_MODEL = normalize_env_value(os.getenv("CHATBOT_MODEL")) or "gpt-4.1-mini"
+CHATBOT_TIMEOUT_SECONDS = env_to_int(os.getenv("CHATBOT_TIMEOUT_SECONDS"), 20)
+
+
+def is_gemini_key(api_key):
+    return bool(api_key) and api_key.startswith("AIza")
+
+
+def is_openai_style_key(api_key):
+    if not api_key:
+        return False
+    lower = api_key.lower()
+    return api_key.startswith("sk-") or "openai" in lower
+
+
+def detect_chat_provider():
+    lower_base = CHATBOT_API_BASE_URL.lower()
+    if "generativelanguage.googleapis.com" in lower_base or is_gemini_key(CHATBOT_API_KEY):
+        return "gemini"
+    return "openai-compatible"
+
+
+def get_effective_chat_model(provider):
+    if provider == "gemini":
+        if CHATBOT_MODEL.lower().startswith("gemini"):
+            return CHATBOT_MODEL
+        return "gemini-1.5-flash"
+    return CHATBOT_MODEL
+=======
+GOOGLE_CLIENT_ID = normalize_env_value(GOOGLE_CLIENT_ID)
+GOOGLE_CLIENT_SECRET = normalize_env_value(GOOGLE_CLIENT_SECRET)
+GOOGLE_REDIRECT_URI = normalize_env_value(os.getenv("GOOGLE_REDIRECT_URI"))
+>>>>>>> main
 
 
 def get_google_redirect_uri():
@@ -353,6 +416,205 @@ def get_silver_kg():
         return 72000
 
 
+def build_prediction_context(payload):
+    if not payload:
+        return (
+            "No active prediction context available yet. "
+            "You can still answer general stock-market and risk-management questions."
+        )
+
+    result = payload.get("result", {})
+    profile = payload.get("profile", {})
+
+    lines = [
+        f"Recommended stock: {result.get('stock', 'N/A')}",
+        f"Action: {result.get('action', 'N/A')}",
+        f"Present price: {result.get('present', 'N/A')}",
+        f"Target price: {result.get('target', 'N/A')}",
+        f"Stop-loss: {result.get('stop_loss', 'N/A')}",
+        f"Time frame: {result.get('timeframe', 'N/A')}",
+        f"Risk appetite: {profile.get('risk', 'N/A')}",
+        f"Horizon: {profile.get('horizon', 'N/A')}",
+        f"Capital: {profile.get('capital', 'N/A')}",
+        f"Sector preference: {profile.get('sector', 'N/A')}",
+        f"Market mood: {profile.get('mood', 'N/A')}"
+    ]
+
+    explanation = result.get("explanation") or []
+    if explanation:
+        lines.append("Reasoning points:")
+        for item in explanation:
+            lines.append(f"- {item}")
+
+    return "\n".join(lines)
+
+
+def trim_chat_history(history, max_messages=10):
+    if not history:
+        return []
+    cleaned = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = (item.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            cleaned.append({"role": role, "content": content})
+    return cleaned[-max_messages:]
+
+
+def fallback_chat_response(question, payload, history=None):
+    result = (payload or {}).get("result", {})
+    profile = (payload or {}).get("profile", {})
+
+    stock = result.get("stock", "the recommended stock")
+    action = result.get("action", "HOLD")
+    present = result.get("present", "N/A")
+    target = result.get("target", "N/A")
+    stop_loss = result.get("stop_loss", "N/A")
+    timeframe = result.get("timeframe", "the selected horizon")
+    risk = profile.get("risk", "your")
+    sector = profile.get("sector", "selected")
+
+    q = (question or "").lower()
+
+    if any(k in q for k in ["hello", "hi", "hey", "namaste", "hii", "yo"]):
+        return (
+            f"Hello! I am your TradeMind assistant. For now, {stock} is marked {action}. "
+            "You can ask me why this stock was selected, risk level, target logic, or entry and exit strategy."
+        )
+
+    if any(k in q for k in ["thanks", "thank you", "thx"]):
+        return "You are welcome. Ask any follow-up and I will break it down in simple terms."
+
+    if any(k in q for k in ["who are you", "what can you do", "help"]):
+        return (
+            "I am TradeMind assistant. I can explain recommendation reason, risk controls, time horizon fit, "
+            "and practical next steps based on your current prediction."
+        )
+
+    if any(k in q for k in ["why", "reason", "kyu", "kyun"]):
+        return (
+            f"{stock} was selected because it matches your {sector} sector preference and {risk} risk profile. "
+            f"For {timeframe}, the engine suggests {action} with target near {target} and risk control at {stop_loss}."
+        )
+
+    if any(k in q for k in ["target", "return", "upside"]):
+        return (
+            f"Current price reference is {present} and model target is {target} for {timeframe}. "
+            "Treat this as scenario guidance, not guaranteed return."
+        )
+
+    if any(k in q for k in ["risk", "stop", "loss", "safe"]):
+        return (
+            f"Risk control is set with stop-loss at {stop_loss}. If price breaks this zone, capital protection is prioritized. "
+            f"Given your {risk} risk profile, position sizing should stay conservative."
+        )
+
+    return (
+        f"Summary: {stock} is currently marked {action} with present {present}, target {target}, and stop-loss {stop_loss} "
+        f"for {timeframe}. Ask about risk, target logic, entry strategy, or sector outlook for deeper detail."
+    )
+
+
+def ask_prediction_chatbot(question, payload, history=None):
+    if not CHATBOT_API_KEY:
+        return fallback_chat_response(question, payload, history=history), "fallback"
+
+    context = build_prediction_context(payload)
+    recent_history = trim_chat_history(history)
+    provider = detect_chat_provider()
+    model_name = get_effective_chat_model(provider)
+
+    system_prompt = (
+        "You are TradeMind AI assistant. Be conversational like a real chat assistant. "
+        "If user greets, greet naturally. Explain stock recommendations simply and clearly. "
+        "Never guarantee profits. Keep replies practical and user-friendly."
+    )
+
+    try:
+        if provider == "gemini":
+            endpoint = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                f"?key={CHATBOT_API_KEY}"
+            )
+
+            contents = []
+            for item in recent_history:
+                role = "model" if item.get("role") == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": item.get("content", "")}]} )
+
+            user_text = f"Prediction context:\n{context}\n\nUser question: {question}"
+            contents.append({"role": "user", "parts": [{"text": user_text}]})
+
+            body = {
+                "systemInstruction": {
+                    "parts": [{"text": system_prompt}]
+                },
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": 0.4,
+                    "maxOutputTokens": 600
+                }
+            }
+
+            req = Request(
+                endpoint,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            raw = urlopen(req, timeout=CHATBOT_TIMEOUT_SECONDS).read().decode("utf-8")
+            parsed = json.loads(raw)
+            parts = (
+                parsed.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [])
+            )
+            answer = "\n".join((p.get("text", "") or "").strip() for p in parts if p.get("text"))
+            answer = answer.strip()
+            if not answer:
+                return fallback_chat_response(question, payload, history=history), "fallback"
+            return answer, "api"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": f"Prediction context:\n{context}"}
+        ]
+        messages.extend(recent_history)
+        messages.append({"role": "user", "content": question})
+
+        body = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.4
+        }
+        endpoint = f"{CHATBOT_API_BASE_URL.rstrip('/')}/chat/completions"
+
+        req = Request(
+            endpoint,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {CHATBOT_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
+        raw = urlopen(req, timeout=CHATBOT_TIMEOUT_SECONDS).read().decode("utf-8")
+        parsed = json.loads(raw)
+        answer = (
+            parsed.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
+        if not answer:
+            return fallback_chat_response(question, payload, history=history), "fallback"
+        return answer, "api"
+    except Exception:
+        return fallback_chat_response(question, payload, history=history), "fallback"
+
+
 # ======================
 # MARKET DASHBOARD (PROTECTED)
 # ======================
@@ -505,7 +767,39 @@ def predict():
             "explanation": explanation
         }
 
+        session["latest_prediction"] = {
+            "result": result,
+            "profile": dict(form)
+        }
+        session["prediction_chat_history"] = []
+
     return render_template("predict.html", result=result, form=form)
+
+
+@app.route("/predict/chatbot", methods=["POST"])
+def predict_chatbot():
+
+    if not session.get("authenticated"):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    payload = session.get("latest_prediction", {})
+
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+
+    if not message:
+        return jsonify({"error": "Message is required."}), 400
+
+    history = trim_chat_history(session.get("prediction_chat_history", []))
+    reply, source = ask_prediction_chatbot(message, payload, history=history)
+
+    updated_history = history + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": reply}
+    ]
+    session["prediction_chat_history"] = trim_chat_history(updated_history)
+
+    return jsonify({"reply": reply, "source": source})
 
 
 # ======================
@@ -521,5 +815,9 @@ def logout():
 # RUN APP
 # ======================
 if __name__ == "__main__":
+<<<<<<< HEAD
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG)
+=======
     app.run(debug=False)
+>>>>>>> main
 
