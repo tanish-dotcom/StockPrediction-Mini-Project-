@@ -1,58 +1,22 @@
-##from flask import Flask, render_template, request, redirect, session
-##import yfinance as yf
-##import random
-##import sqlite3
-##from werkzeug.security import generate_password_hash, check_password_hash
-##import csv
-##
-##app = Flask(__name__)
-##app.secret_key = "trademind-secret-key"
-##
-##USD_INR = 83.0
-##
-##
-### ======================
-### DATABASE INIT
-### ======================
-##def init_db():
-##    conn = sqlite3.connect("trademind.db")
-##    c = conn.cursor()
-##
-##    c.execute("""
-##        CREATE TABLE IF NOT EXISTS users (
-##            id INTEGER PRIMARY KEY AUTOINCREMENT,
-##            fullname TEXT NOT NULL,
-##            username TEXT UNIQUE NOT NULL,
-##            email TEXT UNIQUE NOT NULL,
-##            password TEXT NOT NULL,
-##            risk_profile TEXT NOT NULL
-##        )
-##    """)
+from flask import Flask, render_template, request, redirect, session
+import yfinance as yf
+import random
+import sqlite3
+from werkzeug.security import generate_password_hash, check_password_hash
+import csv
+import os
+import requests
+import json
 
-##    c.execute("""
-##        CREATE TABLE IF NOT EXISTS prediction_history (
-##            id INTEGER PRIMARY KEY AUTOINCREMENT,
-##            username TEXT,
-##            stock TEXT,
-##            sector TEXT,
-##            action TEXT,
-##            present REAL,
-##            target REAL,
-##            stop_loss REAL,
-##            timeframe TEXT,
-##            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-##        )
-##    """)
-##
-##    conn.commit()
-##    conn.close()
-##
-##init_db()
-##
-##
-### ======================
-### HELPER FUNCTIONS
-### ======================
+app = Flask(__name__)
+app.secret_key = "trademind-secret-key"
+
+USD_INR = 83.0
+
+
+# ======================
+# HELPER FUNCTIONS
+# ======================
 ##def get_index_price(symbol, fallback):
 ##    try:
 ##        data = yf.Ticker(symbol).history(period="1d")
@@ -401,16 +365,34 @@
 
 
 
-from flask import Flask, render_template, request, redirect, session
+from flask import Flask, render_template, request, redirect, session, url_for
 import yfinance as yf
 import random
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 import csv
+import os
+import secrets
+from urllib.parse import urlencode
+import json
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+try:
+    import requests
+except ImportError:
+    requests = None
 
 
 app = Flask(__name__)
 app.secret_key = "trademind-secret-key"
+
+# Session Configuration for OAuth
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
+app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour
 
 USD_INR = 83.0
 
@@ -418,37 +400,36 @@ USD_INR = 83.0
 # DATABASE INIT
 # ======================
 def init_db():
-    conn = sqlite3.connect("trademind.db")
-    c = conn.cursor()
+    with sqlite3.connect("trademind.db", timeout=10) as conn:
+        c = conn.cursor()
 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fullname TEXT,
-            username TEXT UNIQUE,
-            email TEXT UNIQUE,
-            password TEXT,
-            risk_profile TEXT
-        )
-    """)
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS prediction_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            stock TEXT,
-            sector TEXT,
-            action TEXT,
-            present REAL,
-            target REAL,
-            stop_loss REAL,
-            timeframe TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fullname TEXT,
+                username TEXT UNIQUE,
+                email TEXT UNIQUE,
+                password TEXT,
+                risk_profile TEXT,
+                google_id TEXT,
+                oauth_provider TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS prediction_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                stock TEXT,
+                sector TEXT,
+                action TEXT,
+                present REAL,
+                target REAL,
+                stop_loss REAL,
+                timeframe TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
 
 init_db()
 
@@ -558,19 +539,14 @@ def signup():
         hashed_password = generate_password_hash(password)
 
         try:
-            conn = sqlite3.connect("trademind.db")
-            c = conn.cursor()
-
-            c.execute("""
-                INSERT INTO users (fullname, username, email, password, risk_profile)
-                VALUES (?, ?, ?, ?, ?)
-            """, (fullname, username, email, hashed_password, risk))
-
-            conn.commit()
-            conn.close()
-
+            with sqlite3.connect("trademind.db", timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("""
+                    INSERT INTO users (fullname, username, email, password, risk_profile)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (fullname, username, email, hashed_password, risk))
+                conn.commit()
             return redirect("/login")
-
         except sqlite3.IntegrityError:
             error = "Username or Email already exists ❌"
 
@@ -592,11 +568,10 @@ def login():
         if user_captcha != session["captcha"]:
             error = "Captcha incorrect ❌"
         else:
-            conn = sqlite3.connect("trademind.db")
-            c = conn.cursor()
-            c.execute("SELECT * FROM users WHERE username=?", (username,))
-            user = c.fetchone()
-            conn.close()
+            with sqlite3.connect("trademind.db", timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("SELECT * FROM users WHERE username=?", (username,))
+                user = c.fetchone()
 
             if user and check_password_hash(user[4], password):
                 session["authenticated"] = True
@@ -630,21 +605,23 @@ def market():
     silver_kpi = get_silver_kg()
     silver = [silver_kpi*0.97, silver_kpi*0.98, silver_kpi*0.99, silver_kpi*1.01, silver_kpi]
 
-    stock_names = ["AAPL","MSFT","GOOGL","AMZN","TSLA"]
-    stock_prices = [get_stock_price(s) for s in stock_names]
+    # Use Indian stocks for dashboard
+    stock_names = ["RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK"]
+    stock_prices = []
+    for s in stock_names:
+        price = get_stock_price(s+".NS", fallback=1000)
+        stock_prices.append(price)
 
-    conn = sqlite3.connect("trademind.db")
-    c = conn.cursor()
-    c.execute("""
-    SELECT stock, action, present, target, stop_loss, timeframe, created_at
-    FROM prediction_history
-    WHERE username=?
-    ORDER BY created_at DESC
-    LIMIT 10
-    """,(session["user"],))
-    
-    history = c.fetchall()
-    conn.close()
+    with sqlite3.connect("trademind.db", timeout=10) as conn:
+        c = conn.cursor()
+        c.execute("""
+        SELECT stock, action, present, target, stop_loss, timeframe, created_at
+        FROM prediction_history
+        WHERE username=?
+        ORDER BY created_at DESC
+        LIMIT 10
+        """, (session["user"],))
+        history = c.fetchall()
 
     return render_template(
         "market.html",
@@ -684,41 +661,31 @@ def predict():
     }
 
     if request.method == "POST":
-        print("METHOD:", request.method)
-
         for key in form:
             form[key] = request.form.get(key)
 
         stocks_by_sector = {}
-
-        with open("stocks.csv", newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                stocks_by_sector.setdefault(row["sector"], []).append(row["symbol"])
+        try:
+            with open("stocks.csv", newline='') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    stocks_by_sector.setdefault(row["sector"], []).append(row["symbol"])
+        except Exception as e:
+            return render_template("predict.html", error="Stock list not found ❌", form=form, result=None)
 
         sector = form["sector"]
-
-        if sector not in stocks_by_sector:
-            return render_template("predict.html", error="No stocks found ❌", form=form)
+        if not sector or sector not in stocks_by_sector:
+            return render_template("predict.html", error="No stocks found for selected sector ❌", form=form, result=None)
 
         stock = random.choice(stocks_by_sector[sector])
-
-        present = get_stock_price(stock)
-
-        # 🔥 VERY IMPORTANT CHECK
+        present = get_stock_price(stock, fallback=None)
         if present is None:
-            return render_template("predict.html", error="Stock data not available ❌", form=form)
+            return render_template("predict.html", error="Stock data not available ❌", form=form, result=None)
 
-        # 🔥 OPTION 1 (simple logic - current)
-        # target = round(present * (1.05 if form["timeframe"]=="1M" else 1.12 if form["timeframe"]=="3M" else 1.2),2)
-        # stop_loss = round(present * 0.95,2)
-
-        # 🔥 OPTION 2 (BETTER - random realistic)
+        # Realistic prediction logic
         change = random.uniform(1.03, 1.15)
         target = round(present * change, 2)
-
         stop_loss = round(present * random.uniform(0.90, 0.97), 2)
-
         action = "BUY" if form["risk"] == "High" else "HOLD"
 
         result = {
@@ -731,16 +698,17 @@ def predict():
             "timeframe": form["timeframe"]
         }
 
-        conn = sqlite3.connect("trademind.db")
-        c = conn.cursor()
-        c.execute("""
-        INSERT INTO prediction_history
-        (username, stock, sector, action, present, target, stop_loss, timeframe)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,(session["user"], stock, sector, action, present, target, stop_loss, form["timeframe"]))
-        
-        conn.commit()
-        conn.close()
+        try:
+            with sqlite3.connect("trademind.db", timeout=10) as conn:
+                c = conn.cursor()
+                c.execute("""
+                    INSERT INTO prediction_history
+                    (username, stock, sector, action, present, target, stop_loss, timeframe)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (session["user"], stock, sector, action, present, target, stop_loss, form["timeframe"]))
+                conn.commit()
+        except Exception as e:
+            return render_template("predict.html", error="Could not save prediction ❌", form=form, result=result)
 
     return render_template("predict.html", result=result, form=form, error=error)
 
@@ -749,6 +717,150 @@ def predict():
 def logout():
     session.clear()
     return redirect("/")
+
+
+# ======================
+# GOOGLE OAUTH
+# ======================
+
+# Google OAuth Configuration
+# Set these environment variables in your system:
+# GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "YOUR_GOOGLE_CLIENT_ID_HERE")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "YOUR_GOOGLE_CLIENT_SECRET_HERE")
+GOOGLE_REDIRECT_URI = "http://127.0.0.1:5000/auth/google/callback"
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USER_INFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+
+
+@app.route("/auth/google")
+def auth_google():
+    """Redirect to Google OAuth consent screen"""
+    
+    # Generate state to prevent CSRF attacks
+    state = secrets.token_urlsafe(32)
+    session["oauth_state"] = state
+    session.modified = True  # Ensure session is saved
+    
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state
+    }
+    
+    return redirect(f"{GOOGLE_AUTH_URL}?{urlencode(params)}")
+
+
+@app.route("/auth/google/callback")
+def auth_google_callback():
+    """Handle Google OAuth callback"""
+    
+    # Verify state to prevent CSRF
+    state = request.args.get("state")
+    stored_state = session.get("oauth_state")
+    
+    if not state or not stored_state or state != stored_state:
+        return redirect("/login?error=csrf_validation_failed"), 400
+    
+    code = request.args.get("code")
+    error = request.args.get("error")
+    
+    if error:
+        return redirect(f"/login?error={error}")
+    
+    if not code:
+        return redirect("/login?error=no_authorization_code"), 400
+    
+    # Exchange code for token
+    if not requests:
+        return redirect("/login?error=requests_library_not_available"), 500
+    
+    try:
+        token_data = {
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "grant_type": "authorization_code"
+        }
+        
+        token_response = requests.post(GOOGLE_TOKEN_URL, data=token_data)
+        token_json = token_response.json()
+        
+        print(f"Token Response: {token_json}")  # DEBUG
+        
+        if "access_token" not in token_json:
+            error_desc = token_json.get("error_description", "Unknown error")
+            print(f"Token Error: {error_desc}")  # DEBUG
+            return redirect(f"/login?error=invalid_token_response"), 400
+        
+        access_token = token_json["access_token"]
+        
+        # Get user info from Google
+        headers = {"Authorization": f"Bearer {access_token}"}
+        user_response = requests.get(GOOGLE_USER_INFO_URL, headers=headers)
+        user_data = user_response.json()
+        
+        print(f"User Data: {user_data}")  # DEBUG
+        
+        if "error" in user_data:
+            print(f"User Info Error: {user_data.get('error_description')}")  # DEBUG
+            return redirect(f"/login?error=failed_to_get_user_info"), 400
+        
+        google_id = user_data.get("id")
+        email = user_data.get("email")
+        name = user_data.get("name", email.split("@")[0] if email else "User")
+        
+        if not google_id or not email:
+            return redirect(f"/login?error=missing_user_data"), 400
+        
+        # Check if user exists
+        with sqlite3.connect("trademind.db", timeout=10) as conn:
+            c = conn.cursor()
+            c.execute("SELECT username FROM users WHERE google_id=?", (google_id,))
+            existing_user = c.fetchone()
+            
+            if existing_user:
+                # User exists, log them in
+                username = existing_user[0]
+            else:
+                # Create new user
+                # Generate username from email
+                base_username = email.split("@")[0]
+                username = base_username
+                counter = 1
+                
+                while True:
+                    c.execute("SELECT id FROM users WHERE username=?", (username,))
+                    if not c.fetchone():
+                        break
+                    username = f"{base_username}{counter}"
+                    counter += 1
+                
+                # Insert new user with Google OAuth
+                try:
+                    c.execute("""
+                        INSERT INTO users (fullname, username, email, password, risk_profile, google_id, oauth_provider)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (name, username, email, None, "Medium", google_id, "google"))
+                    conn.commit()
+                except sqlite3.IntegrityError as e:
+                    return redirect(f"/login?error=user_creation_failed"), 400
+        
+        # Log user in
+        session["authenticated"] = True
+        session["user"] = username
+        session.pop("oauth_state", None)
+        
+        return redirect("/market")
+        
+    except Exception as e:
+        print(f"Google OAuth Error: {str(e)}")
+        return redirect(f"/login?error=oauth_processing_error"), 500
 
 
 if __name__ == "__main__":
